@@ -13,12 +13,14 @@ import torch
 import numpy as np
 import argparse
 from scipy.spatial.transform import Rotation as R
+from torchvision import transforms
 
 from config.config import cfg
 from control_msg import PositionCommand
 from policy.yopo_network import YopoNetwork
 from policy.poly_solver import *
 from policy.state_transform import *
+from segmentation.model import SegmentationUNet
 
 try:
     from torch2trt import TRTModule
@@ -63,6 +65,10 @@ class YopoNet:
         self.state_transform = StateTransform()
         self.lattice_primitive = LatticePrimitive.get_instance()
         self.traj_time = self.lattice_primitive.segment_time
+        self.safe_bonus_scale = self.config.get("safe_bonus_scale", 2.0)
+        self.segmentation_threshold = self.config.get("segmentation_threshold", 0.5)
+        self.image_fps = 30  # used only as processing time tolerance for printing logs
+        self.safe_weights = np.ones(self.lattice_primitive.traj_num, dtype=np.float32)
 
         # eval
         self.time_forward = 0.0
@@ -71,7 +77,6 @@ class YopoNet:
         self.time_interpolation = 0.0
         self.time_visualize = 0.0
         self.count = 0
-        self.depth_fps = 30  # used only as processing time tolerance for printing logs
 
         # Load Network
         if self.use_trt:
@@ -83,6 +88,19 @@ class YopoNet:
             self.policy.load_state_dict(state_dict)
             self.policy = self.policy.to(self.device)
             self.policy.eval()
+        self.seg_device = self.device
+        self.segmentation_model = SegmentationUNet().to(self.seg_device)
+        if os.path.exists(self.config["segmentation_weight"]):
+            print("Loading segmentation checkpoint", self.config["segmentation_weight"])
+            self.segmentation_model.load_state_dict(torch.load(self.config["segmentation_weight"], weights_only=True))
+        else:
+            print("Segmentation checkpoint not found, using randomly initialized model.")
+        self.segmentation_model.eval()
+        self.seg_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Resize((self.height, self.width), antialias=True),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
         self.warm_up()
 
         # ros publisher
@@ -92,7 +110,7 @@ class YopoNet:
         self.ctrl_pub = rospy.Publisher(self.config["ctrl_topic"], PositionCommand, queue_size=1)
         # ros subscriber
         self.odom_sub = rospy.Subscriber(self.config['odom_topic'], Odometry, self.callback_odometry, queue_size=1, tcp_nodelay=True)
-        self.depth_sub = rospy.Subscriber(self.config['depth_topic'], Image, self.callback_depth, queue_size=1, tcp_nodelay=True)
+        self.rgb_sub = rospy.Subscriber(self.config['rgb_topic'], Image, self.callback_rgb, queue_size=1, tcp_nodelay=True)
         self.goal_sub = rospy.Subscriber("/move_base_simple/goal", PoseStamped, self.callback_set_goal, queue_size=1)
         # ros timer
         rospy.sleep(1.0)  # wait connection...
@@ -144,45 +162,44 @@ class YopoNet:
         return obs_norm.to(self.device, non_blocking=True)
 
     @torch.inference_mode()
-    def callback_depth(self, data):
-        if not self.odom_init: return
+    def callback_rgb(self, data):
+        if not self.odom_init:
+            return
 
-        # 1. Depth Image Process
+        # 1. RGB Image Process + segmentation
         time0 = time.time()
-        # depth = self.bridge.imgmsg_to_cv2(data, "32FC1")
-        assert data.encoding == "32FC1", f"Expected encoding '32FC1', got {data.encoding}"
-        depth = np.frombuffer(data.data, dtype=np.float32).reshape(data.height, data.width)
+        assert data.encoding in ["rgb8", "bgr8"], f"Expected encoding 'rgb8' or 'bgr8', got {data.encoding}"
+        rgb = np.frombuffer(data.data, dtype=np.uint8).reshape(data.height, data.width, 3)
+        if data.encoding == "bgr8":
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
-        if depth.shape[0] != self.height or depth.shape[1] != self.width:
-            depth = cv2.resize(depth, (self.width, self.height), interpolation=cv2.INTER_NEAREST)
-        depth = np.minimum(depth * self.scale, self.max_dis) / self.max_dis
+        if rgb.shape[0] != self.height or rgb.shape[1] != self.width:
+            rgb = cv2.resize(rgb, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
 
-        # interpolated the nan value (experiment shows that treating nan directly as 0 produces similar results)
-        nan_mask = np.isnan(depth) | (depth < self.min_dis / self.max_dis)
-        interpolated_image = cv2.inpaint(np.uint8(depth * 255), np.uint8(nan_mask), 1, cv2.INPAINT_NS)
-        interpolated_image = interpolated_image.astype(np.float32) / 255.0
-        depth = interpolated_image.reshape([1, 1, self.height, self.width])
-        # cv2.imshow("1", depth[0][0])
-        # cv2.waitKey(1)
+        seg_input = self.seg_transform(rgb).unsqueeze(0).to(self.seg_device, non_blocking=True)
+        seg_logits = self.segmentation_model(seg_input)
+        seg_prob = torch.sigmoid(seg_logits).squeeze().detach().cpu().numpy()
+        safe_mask = (seg_prob > self.segmentation_threshold).astype(np.float32)
+        safe_mask = self.find_largest_safe_region(safe_mask)
+        self.safe_weights = self.compute_safe_grid_weights(safe_mask)
+
+        semantic_depth = safe_mask.reshape([1, 1, self.height, self.width])
 
         # 2. YOPO Network Inference
-        # input prepare
         time1 = time.time()
-        depth_input = torch.from_numpy(depth).to(self.device, non_blocking=True)  # (non_blocking: copying speed 3x)
+        depth_input = torch.from_numpy(semantic_depth).to(self.device, non_blocking=True)
         obs_norm = self.process_odom()
         obs_input = self.state_transform.prepare_input(obs_norm)
         obs_input = obs_input.to(self.device, non_blocking=True)
-        # torch.cuda.synchronize()
 
         time2 = time.time()
-        # Forward (TensorRT: inference speed increased by 5x)
         endstate_pred, score_pred = self.policy(depth_input, obs_input)
         endstate_pred, score_pred = endstate_pred.cpu().numpy(), score_pred.cpu().numpy()
         time3 = time.time()
 
         # 3. Post-Processing
-        # Replacing PyTorch operation on CUDA with NumPy operation on CPU (speed increased by 10x)
-        endstate, score = self.process_output(endstate_pred, score_pred, return_all_preds=self.visualize)
+        endstate, score = self.process_output(endstate_pred, score_pred, safe_weights=self.safe_weights,
+                                              return_all_preds=self.visualize)
         # Vectorization: transform the prediction(P V A in body frame) to the world frame with the attitude (without the position)
         endstate_c = endstate.reshape(-1, 3, 3).transpose(0, 2, 1)  # [N, 9] -> [N, 3, 3] -> [px vx ax, py vy ay, pz vz az]
         endstate_w = np.matmul(self.Rotation_wc, endstate_c)
@@ -239,12 +256,18 @@ class YopoNet:
             self.last_control_msg = control_msg
             self.ctrl_pub.publish(control_msg)
 
-    def process_output(self, endstate_pred, score_pred, return_all_preds=False):
+    def process_output(self, endstate_pred, score_pred, safe_weights=None, return_all_preds=False):
         endstate_pred = endstate_pred.reshape(9, self.lattice_primitive.traj_num).T
         score_pred = score_pred.reshape(self.lattice_primitive.traj_num)
 
+        score_for_selection = score_pred
+        if safe_weights is not None:
+            safe_weights = np.asarray(safe_weights)
+            normalized = safe_weights / (safe_weights.max() + 1e-6)
+            score_for_selection = score_pred - self.safe_bonus_scale * normalized
+
         if not return_all_preds:
-            action_id = np.argmin(score_pred)
+            action_id = int(np.argmin(score_for_selection))
             lattice_id = self.lattice_primitive.traj_num - 1 - action_id
             endstate = self.state_transform.pred_to_endstate_cpu(endstate_pred[action_id, :][np.newaxis, :], lattice_id)
             score = score_pred[action_id]
@@ -333,18 +356,18 @@ class YopoNet:
         self.count = self.count + 1
 
         total_time = (time5 - time0) * 1000
-        tolerance = 1000.0 / self.depth_fps
+        tolerance = 1000.0 / self.image_fps
         if total_time > tolerance:
             rospy.logwarn(f"Warn: Processing time {(time5 - time0) * 1000:.2f} ms exceeds {tolerance:.2f} ms, may cause message lag!")
             print(f"\033[34mCurrent Time Consuming:\033[0m "
-                  f"depth-interpolation: \033[32m{1000 * (time1 - time0):.2f} ms\033[0m; "
+                  f"image-segmentation: \033[32m{1000 * (time1 - time0):.2f} ms\033[0m; "
                   f"data-prepare: \033[32m{1000 * (time2 - time1):.2f} ms\033[0m; "
                   f"network-inference: \033[32m{1000 * (time3 - time2):.2f} ms\033[0m; "
                   f"post-process: \033[32m{1000 * (time4 - time3):.2f} ms\033[0m; "
                   f"visualize-trajectory: \033[32m{1000 * (time5 - time4):.2f} ms\033[0m")
         if self.verbose or (total_time > tolerance):
             print(f"\033[34mAverage Time Consuming:\033[0m "
-                  f"depth-interpolation: \033[32m{1000 * self.time_interpolation / self.count:.2f} ms\033[0m; "
+                  f"image-segmentation: \033[32m{1000 * self.time_interpolation / self.count:.2f} ms\033[0m; "
                   f"data-prepare: \033[32m{1000 * self.time_prepare / self.count:.2f} ms\033[0m; "
                   f"network-inference: \033[32m{1000 * self.time_forward / self.count:.2f} ms\033[0m; "
                   f"post-process: \033[32m{1000 * self.time_process / self.count:.2f} ms\033[0m; "
@@ -356,6 +379,45 @@ class YopoNet:
         obs = self.state_transform.prepare_input(obs)
         endstate_pred, score_pred = self.policy(depth, obs)
         _ = self.state_transform.pred_to_endstate(endstate_pred)
+        dummy_rgb = torch.zeros((1, 3, self.height, self.width), dtype=torch.float32, device=self.seg_device)
+        _ = self.segmentation_model(dummy_rgb)
+
+    def find_largest_safe_region(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Keep only the largest connected safe component to stabilize downstream primitive selection.
+        """
+        mask_uint8 = (mask > 0.5).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(mask_uint8)
+        if num_labels <= 1:
+            return mask
+        areas = [np.sum(labels == i) for i in range(1, num_labels)]
+        largest_idx = np.argmax(areas) + 1
+        largest_mask = (labels == largest_idx).astype(np.float32)
+        return largest_mask
+
+    def compute_safe_grid_weights(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Project the largest safe region onto the primitive grid to bias trajectory selection toward safe cells.
+        """
+        h, w = mask.shape
+        v_step = h // self.lattice_primitive.vertical_num
+        h_step = w // self.lattice_primitive.horizon_num
+        safe_scores = np.zeros(self.lattice_primitive.traj_num, dtype=np.float32)
+
+        for v_idx in range(self.lattice_primitive.vertical_num):  # bottom to top
+            y_start = h - (v_idx + 1) * v_step
+            y_end = h - v_idx * v_step if v_idx < self.lattice_primitive.vertical_num - 1 else h
+            for h_idx in range(self.lattice_primitive.horizon_num):  # left to right
+                x_start = h_idx * h_step
+                x_end = (h_idx + 1) * h_step if h_idx < self.lattice_primitive.horizon_num - 1 else w
+                grid_mask = mask[y_start:y_end, x_start:x_end]
+                safe_ratio = grid_mask.mean() if grid_mask.size > 0 else 0.0
+                grid_id = v_idx * self.lattice_primitive.horizon_num + (self.lattice_primitive.horizon_num - 1 - h_idx)
+                safe_scores[grid_id] = safe_ratio
+
+        if safe_scores.max() < 1e-6:
+            safe_scores += 1.0  # avoid zeroing out all trajectories
+        return safe_scores
 
 
 def parser():
@@ -363,6 +425,8 @@ def parser():
     parser.add_argument("--use_tensorrt", type=int, default=0, help="use tensorrt or not")
     parser.add_argument("--trial", type=int, default=1, help="trial number")
     parser.add_argument("--epoch", type=int, default=50, help="epoch number")
+    parser.add_argument("--segmentation_weight", type=str, default="saved/segmentation/segmentation_epoch0.pth",
+                        help="checkpoint path of RGB obstacle segmentation network")
     return parser
 
 
@@ -377,10 +441,13 @@ if __name__ == "__main__":
                 'env': 'simulation',     # 深度图来源 ('435' or 'simulation', 和深度单位有关)
                 'pitch_angle_deg': -0,   # 相机俯仰角(仰为负)
                 'odom_topic': '/sim/odom',                   # 里程计话题
-                'depth_topic': '/depth_image',               # 深度图话题
+                'rgb_topic': '/rgb_image',                   # RGB 图像话题（与分割模型输入一致）
                 'ctrl_topic': '/so3_control/pos_cmd',        # 控制器话题
                 'plan_from_reference': False,   # 从参考状态规划？位置控制器: True, 神经网络直接控制: False
                 'verbose': False,               # 打印耗时？
-                'visualize': True               # 可视化所有轨迹？(实飞改为False节省计算)
+                'visualize': True,              # 可视化所有轨迹？(实飞改为False节省计算)
+                'segmentation_weight': os.path.join(base_dir, args.segmentation_weight),
+                'segmentation_threshold': 0.5,
+                'safe_bonus_scale': 2.0,
                 }
     YopoNet(settings, weight)
