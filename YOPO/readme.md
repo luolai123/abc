@@ -5,11 +5,12 @@ Ensure that the CUDA versions of the virtual environment and system are consiste
 
 ## RGB segmentation data & training
 
-- Use `python segmentation/data_preparation.py --rgb_dir <RGB_DIR> --depth_dir <DEPTH_DIR> --mask_dir <MASK_DIR>` to convert aligned RGB/depth recordings into pixel-wise obstacle/safe masks (depth values closer than the threshold are marked as obstacles).
-- Arrange the generated data as:
+- Collect data with the simulator: `rosrun sensor_simulator dataset_generator` (runs from `Simulator/`, saves RGB to `../dataset/rgb/` and depth to `../dataset/depth/`).
+- Convert depth to masks: `python segmentation/data_preparation.py --rgb_dir ../dataset/rgb --depth_dir ../dataset/depth --mask_dir ../dataset/mask --obstacle_threshold 5.0 --width 160 --height 96`.
+- Arrange training data as:
   - `<dataset_root>/rgb/*.png|jpg`
   - `<dataset_root>/mask/*.png`
-- Train the lightweight U-Net binary classifier with `python train_segmentation.py --data_root <dataset_root> --log_dir saved/segmentation`.
+- Train the lightweight U-Net binary classifier: `python train_segmentation.py --data_root ../dataset --log_dir saved/segmentation --epochs 50 --batch_size 8`.
 
 ## Online inference notes
 

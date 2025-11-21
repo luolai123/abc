@@ -85,16 +85,26 @@ python train_yopo.py
    Configure trajectory optimization in `YOPO/config/traj_opt.yaml`. Training 50 epochs on ~100k samples typically completes within an hour on an RTX 3080.
 
 ### Train RGB obstacle segmentation
-1. **Prepare RGB/depth pairs** (collected from the simulator). Generate binary masks using depth thresholds:
+1. **Collect synchronized RGB+depth** using the simulator dataset generator (same as YOPO policy data):
    ```bash
-cd YOPO
-conda activate yopo
-python -m segmentation.data_preparation --data_root ../dataset --depth_threshold 5.0
-```
-2. **Train the segmentation model**
+   cd Simulator
+   source devel/setup.bash
+   rosrun sensor_simulator dataset_generator
+   ```
+   By default, recordings are written under `../dataset/` with RGB in `dataset/rgb/` and depth images in `dataset/depth/`.
+2. **Generate binary masks** from depth (1 = safe, 0 = obstacle) and resize if needed:
    ```bash
-python train_segmentation.py --data_root ../dataset --epochs 50 --batch_size 8
-```
+   cd ../YOPO
+   conda activate yopo
+   python segmentation/data_preparation.py \
+     --rgb_dir ../dataset/rgb --depth_dir ../dataset/depth --mask_dir ../dataset/mask \
+     --depth_scale 0.001 --obstacle_threshold 5.0 --width 160 --height 96
+   ```
+   This creates `<dataset_root>/mask/*.png` aligned with the RGB filenames.
+3. **Train the segmentation model**
+   ```bash
+   python train_segmentation.py --data_root ../dataset --epochs 50 --batch_size 8
+   ```
    The script trains a lightweight U-Net with binary cross-entropy and saves checkpoints to `YOPO/saved/segmentation/`.
 
 ## Advanced Usage
