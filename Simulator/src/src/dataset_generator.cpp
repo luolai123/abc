@@ -50,6 +50,23 @@ void saveDepthAs16BitPNG(const cv::Mat &depth_float, float max_depth_dist, const
     cv::imwrite(filepath, depth_scaled);
 }
 
+cv::Mat colorizeDepth(const cv::Mat &depth_float, float max_depth_dist)
+{
+    cv::Mat depth_normalized;
+    depth_normalized = depth_float / max_depth_dist;
+
+    // clip [0,1]
+    cv::threshold(depth_normalized, depth_normalized, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(depth_normalized, depth_normalized, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    cv::Mat depth_uint8;
+    depth_normalized.convertTo(depth_uint8, CV_8UC1, 255.0);
+
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_uint8, depth_color, cv::COLORMAP_TURBO);
+    return depth_color;
+}
+
 Eigen::Quaternionf RPY2Quat(float roll_deg, float pitch_deg, float yaw_deg)
 {
     float roll = roll_deg * M_PI / 180.0f;
@@ -148,6 +165,12 @@ int main(int argc, char **argv)
     std::normal_distribution<float> normal_distribution(0.0f, 1.0f); // 均值0，标准差1
     std::uniform_real_distribution<float> uniform_uniform(0.0f, 1.0f);
     prepareSavePath(save_path, true);
+
+    fs::path depth_root = fs::path(save_path) / "depth";
+    fs::path rgb_root = fs::path(save_path) / "rgb";
+    prepareSavePath(depth_root.string());
+    prepareSavePath(rgb_root.string());
+
     for (int map_i = 0; map_i < env_num; ++map_i)
     {
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
@@ -217,6 +240,14 @@ int main(int argc, char **argv)
 
             std::string filename = image_path + "/img_" + std::to_string(image_i) + ".png";
             saveDepthAs16BitPNG(depth_image, camera.max_depth_dist, filename);
+
+            // 同时保存聚合的深度和伪彩RGB图像，便于训练分割网络
+            std::string flat_name = "img_" + std::to_string(map_i) + "_" + std::to_string(image_i) + ".png";
+            saveDepthAs16BitPNG(depth_image, camera.max_depth_dist, (depth_root / flat_name).string());
+
+            cv::Mat rgb_image = colorizeDepth(depth_image, camera.max_depth_dist);
+            cv::imwrite((fs::path(image_path) / ("rgb_" + std::to_string(image_i) + ".png")).string(), rgb_image);
+            cv::imwrite((rgb_root / flat_name).string(), rgb_image);
 
             pose_file << std::fixed << std::setprecision(6)
                       << pos.x() << "," << pos.y() << "," << pos.z() << ","
