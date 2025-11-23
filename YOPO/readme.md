@@ -14,5 +14,5 @@ Ensure that the CUDA versions of the virtual environment and system are consiste
 
 ## Online inference notes
 
-- `test_yopo_ros.py` now consumes an RGB topic (`rgb_topic`) and runs the segmentation network before YOPO inference. The binary mask is used both as the perception input to the policy (replacing the depth channel) and to bias primitive selection toward the largest safe component in the view.
+- `test_yopo_ros.py` now consumes an RGB topic (`rgb_topic`) and runs the segmentation network before YOPO inference. The binary mask is used both as the perception input to the policy (replacing the depth channel) and to bias primitive selection toward the largest safe component in the view. If the incoming image encoding is `16UC1` or `32FC1`, the node will auto-colorize the depth using Turbo colormap (respecting `env` scale settings such as `435` → 0.001) so the colors reflect depth rather than raw monocular textures.
 - Configure segmentation weights via `--segmentation_weight` when launching `test_yopo_ros.py`.
