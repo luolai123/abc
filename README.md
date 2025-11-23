@@ -56,6 +56,7 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    source devel/setup.bash
    rosrun sensor_simulator sensor_simulator_cuda
    ```
+   - 若需要在 RViz 查看 RGB 输入，确保 `Simulator/src/config/config.yaml` 中 `render_rgb: true`，摄像头话题默认为 `/rgb_image`。
 3. 运行 YOPO
    ```bash
    cd ../YOPO
@@ -82,6 +83,10 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    - `dataset/rgb/img_<map_id>_<idx>.png`：按深度伪彩上色的 RGB（与深度对齐，可直接用于分割训练）。
 
    > 说明：RGB 由深度经 `COLORMAP_TURBO` 伪彩映射生成，若需要真实纹理可自行替换相机渲染逻辑。
+
+### 训练概览
+- **运动基元偏移量训练（YOPO 主体）**：`python train_yopo.py`，使用深度图和轨迹优化标签监督网络输出的末端状态与评分。
+- **RGB 像素级二分类训练**：`python train_segmentation.py --data_root ../dataset`，输入与深度对齐的 RGB，输出障碍/安全区域掩码，用于推理时约束运动基元的选择方向。
 
 ## YOPO 训练流程
 1. **准备数据**：默认读取 `config/traj_opt.yaml` 中的 `dataset_path`（默认为 `../dataset`），直接使用上一步采集的深度图。
