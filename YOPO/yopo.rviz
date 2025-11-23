@@ -53,7 +53,7 @@ Visualization Manager:
       Value: true
     - Class: rviz/Image
       Enabled: true
-      Image Topic: /depth_image
+      Image Topic: /rgb_image
       Max Value: 1
       Median window: 5
       Min Value: 0

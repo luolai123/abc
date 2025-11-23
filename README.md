@@ -5,7 +5,7 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
 ## Features
 - One-stage planner that scores and refines motion primitives for high-speed flight.
 - CUDA-accelerated simulator for large-scale data generation and testing.
-- RGB obstacle segmentation pipeline: depth-threshold label generation, training script, and ROS integration for selecting safe regions.
+- Monocular RGB obstacle segmentation pipeline: label generation, training script, and ROS integration for selecting safe regions.
 - TensorRT export for real-time deployment on NVIDIA Jetson.
 
 ## Requirements
@@ -43,7 +43,7 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
      ```
    每次开新终端运行仿真或采集数据前，记得 `source devel/setup.bash`。
 
-## 仿真运行（使用预训练权重）
+## 仿真运行（使用预训练权重，单目相机）
 1. 启动控制器
    ```bash
    cd Controller
@@ -56,7 +56,7 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    source devel/setup.bash
    rosrun sensor_simulator sensor_simulator_cuda
    ```
-   - 若需要在 RViz 查看 RGB 输入，确保 `Simulator/src/config/config.yaml` 中 `render_rgb: true`，摄像头话题默认为 `/rgb_image`。
+   - 若需要在 RViz 查看 RGB 输入（单目相机），确保 `Simulator/src/config/config.yaml` 中 `render_rgb: true`，摄像头话题默认为 `/rgb_image`。
 3. 运行 YOPO
    ```bash
    cd ../YOPO
@@ -68,7 +68,7 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    rviz -d yopo.rviz
    ```
 
-## 数据采集（YOPO 训练 & RGB 分割）
+## 数据采集（YOPO 训练 & 单目 RGB 分割）
 1. **配置采集范围与相机参数**：编辑 `Simulator/src/config/config.yaml`（如 `env_num`、`image_num`、`x_range`、`camera.max_depth_dist`）。
 2. **运行采集器**（会重置 `../dataset/`）：
    ```bash
@@ -77,19 +77,18 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    rosrun sensor_simulator dataset_generator
    ```
    生成内容：
-   - `dataset/<map_id>/img_*.png`：每个随机环境的深度 16-bit PNG（按 `max_depth_dist` 归一化）。
+   - `dataset/<map_id>/img_*.png`：每个随机环境的单目 RGB 图。
    - `dataset/pose-<map_id>.csv`：对应位姿（px,py,pz,qw,qx,qy,qz）。
-   - `dataset/depth/img_<map_id>_<idx>.png`：聚合后的深度（便于分割数据处理）。
-   - `dataset/rgb/img_<map_id>_<idx>.png`：按深度伪彩上色的 RGB（与深度对齐，可直接用于分割训练）。
+   - `dataset/rgb/img_<map_id>_<idx>.png`：单目 RGB 序列（与训练分割网络一致）。
 
-   > 说明：RGB 由深度经 `COLORMAP_TURBO` 伪彩映射生成，若需要真实纹理可自行替换相机渲染逻辑。
+   > 说明：单目图像可直接作为分割网络输入，如需语义或纹理增强可自行扩展渲染逻辑。
 
 ### 训练概览
-- **运动基元偏移量训练（YOPO 主体）**：`python train_yopo.py`，使用深度图和轨迹优化标签监督网络输出的末端状态与评分。
+- **运动基元偏移量训练（YOPO 主体）**：`python train_yopo.py`，使用单目分割掩膜和轨迹优化标签监督网络输出的末端状态与评分。
 - **RGB 像素级二分类训练**：`python train_segmentation.py --data_root ../dataset`，输入与深度对齐的 RGB，输出障碍/安全区域掩码，用于推理时约束运动基元的选择方向。
 
 ## YOPO 训练流程
-1. **准备数据**：默认读取 `config/traj_opt.yaml` 中的 `dataset_path`（默认为 `../dataset`），直接使用上一步采集的深度图。
+1. **准备数据**：默认读取 `config/traj_opt.yaml` 中的 `dataset_path`（默认为 `../dataset`），直接使用上一步采集的单目分割掩膜。
 2. **启动训练**
    ```bash
    cd YOPO
@@ -99,15 +98,13 @@ YOPO is a learning-based motion planner for agile flight in obstacle-dense envir
    典型设置：~10 张地图、共 10 万帧，RTX 3080 约 1 小时完成 50 epoch。调整轨迹/速度采样请修改 `config/traj_opt.yaml`。
 
 ## RGB 障碍分割训练
-1. **生成二值掩膜**（深度→mask，对齐 RGB）：
+1. **生成二值掩膜**（单目→mask，对齐 RGB）：
    ```bash
    cd YOPO
    conda activate yopo
    python segmentation/data_preparation.py \
-     --rgb_dir ../dataset/rgb --depth_dir ../dataset/depth --mask_dir ../dataset/mask \
-     --depth_scale 0.00030518 --obstacle_threshold 5.0 --width 160 --height 96
+     --rgb_dir ../dataset/rgb --mask_dir ../dataset/mask --obstacle_threshold 5.0 --width 160 --height 96
    ```
-   - `depth_scale` 应设为 `max_depth_dist / 65535`（默认 20m ≈ 0.00030518）。
    - 输出 `dataset/mask/*.png` 与 RGB 同名。
 
 2. **训练分割网络**
@@ -127,7 +124,7 @@ cd YOPO
 python yopo_trt_transfer.py --trial=1 --epoch=50
 python test_yopo_ros.py --use_tensorrt=1
 ```
-- **Real hardware:** set `env` in `test_yopo_ros.py` to your camera depth unit (e.g., `env: 435`) and update odometry topics to NWU frame. Ensure RGB camera resolution/FOV matches training setup.
+- **Real hardware:** set `env` in `test_yopo_ros.py` to match your monocular camera calibration and update odometry topics to NWU frame. Ensure RGB camera resolution/FOV matches training setup.
 
 ## FAQ
 - **Where are pretrained weights?** Default YOPO weights are at `YOPO/saved/YOPO_1/epoch50.pth`; segmentation checkpoints are saved under `YOPO/saved/segmentation/`.
