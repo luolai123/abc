@@ -11,6 +11,7 @@
 #include <sensor_msgs/Image.h>
 #include <pcl_ros/point_cloud.h>
 #include <cv_bridge/cv_bridge.h>
+#include <sensor_msgs/image_encodings.h>
 #include <iostream>
 #include <vector>
 #include <yaml-cpp/yaml.h>
@@ -19,6 +20,25 @@
 #include "maps.hpp"
 
 using namespace raycast;
+
+cv::Mat colorizeDepthImage(const cv::Mat &depth_image, float max_depth_dist, bool normalize_depth) {
+    cv::Mat depth_normalized;
+    if (normalize_depth) {
+        depth_normalized = depth_image.clone();
+    } else {
+        depth_image.convertTo(depth_normalized, CV_32FC1, 1.0f / max_depth_dist);
+    }
+
+    cv::threshold(depth_normalized, depth_normalized, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(depth_normalized, depth_normalized, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    cv::Mat depth_uint8;
+    depth_normalized.convertTo(depth_uint8, CV_8UC1, 255.0);
+
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_uint8, depth_color, cv::COLORMAP_TURBO);
+    return depth_color;
+}
 
 class SensorSimulator {
 public:
@@ -48,14 +68,18 @@ public:
 
         render_lidar = config["render_lidar"].as<bool>();
         render_depth = config["render_depth"].as<bool>();
+        render_rgb = config["render_rgb"].as<bool>();
         float depth_fps = config["depth_fps"].as<float>();
+        float rgb_fps = config["rgb_fps"].as<float>();
         float lidar_fps = config["lidar_fps"].as<float>();
         depth_pub_duration = ros::Duration(1 / depth_fps);
+        rgb_pub_duration = ros::Duration(1 / rgb_fps);
         lidar_pub_duration = ros::Duration(1 / lidar_fps);
         
         std::string ply_file = config["ply_file"].as<std::string>();
         std::string odom_topic = config["odom_topic"].as<std::string>();
         std::string depth_topic = config["depth_topic"].as<std::string>();
+        std::string rgb_topic = config["rgb_topic"].as<std::string>();
         std::string lidar_topic = config["lidar_topic"].as<std::string>();
 
         // 读取地图参数
@@ -102,11 +126,13 @@ public:
         printf("2.Mapping... \n");
         grid_map = new GridMap(cloud, resolution, occupy_threshold);
         
-        ros::Time next_depth_pub_time = ros::Time::now();
-        ros::Time next_lidar_pub_time = ros::Time::now();
+        next_depth_pub_time = ros::Time::now();
+        next_rgb_pub_time = ros::Time::now();
+        next_lidar_pub_time = ros::Time::now();
 
         // ROS
         image_pub_ = nh_.advertise<sensor_msgs::Image>(depth_topic, 1);
+        rgb_pub_ = nh_.advertise<sensor_msgs::Image>(rgb_topic, 1);
         point_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(lidar_topic, 1);
         odom_sub_ = nh_.subscribe(odom_topic, 1, &SensorSimulator::odomCallback, this, ros::TransportHints().tcpNoDelay());
         timer_map_   = nh_.createTimer(ros::Duration(1), &SensorSimulator::timerMapCallback, this);
@@ -119,12 +145,15 @@ public:
 
     void renderDepthCallback(const ros::Time stamp);
 
+    void renderRgbCallback(const ros::Time stamp);
+
     void renderLidarCallback(const ros::Time stamp);
 
     void timerMapCallback(const ros::TimerEvent &);
 
 private:
     bool render_depth{false};
+    bool render_rgb{false};
     bool render_lidar{false};
     Eigen::Quaternionf quat;
     Eigen::Quaternionf quat_bc, quat_wc;
@@ -136,15 +165,15 @@ private:
     sensor_msgs::PointCloud2 output;
     
     ros::NodeHandle nh_;
-    ros::Publisher image_pub_, point_cloud_pub_;
+    ros::Publisher image_pub_, rgb_pub_, point_cloud_pub_;
     ros::Publisher pcl_pub;
     ros::Subscriber odom_sub_;
     ros::Timer timer_depth_, timer_lidar_, timer_map_;
 
-    ros::Time next_depth_pub_time, next_lidar_pub_time;
-    ros::Duration depth_pub_duration, lidar_pub_duration;
-    double depth_time{0.0}, lidar_time{0.0};
-    int depth_count{0}, lidar_count{0};
+    ros::Time next_depth_pub_time, next_rgb_pub_time, next_lidar_pub_time;
+    ros::Duration depth_pub_duration, rgb_pub_duration, lidar_pub_duration;
+    double depth_time{0.0}, rgb_time{0.0}, lidar_time{0.0};
+    int depth_count{0}, rgb_count{0}, lidar_count{0};
     // mocka::Maps map;
 };
 
@@ -173,6 +202,31 @@ void SensorSimulator::renderDepthCallback(const ros::Time stamp) {
     cv_image.image = depth_image;
     cv_image.toImageMsg(ros_image);
     image_pub_.publish(ros_image);
+}
+
+void SensorSimulator::renderRgbCallback(const ros::Time stamp) {
+    if (!render_rgb)
+        return;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    cudaMat::SE3<float> T_wc(quat_wc.w(), quat_wc.x(), quat_wc.y(), quat_wc.z(), pos.x(), pos.y(), pos.z());
+    cv::Mat depth_image;
+    renderDepthImage(grid_map, camera, T_wc, depth_image);
+    cv::Mat rgb_image = colorizeDepthImage(depth_image, camera->max_depth_dist, camera->normalize_depth);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    rgb_time += elapsed.count();
+    rgb_count++;
+
+    sensor_msgs::Image ros_image;
+    cv_bridge::CvImage cv_image;
+    cv_image.header.stamp = stamp;
+    cv_image.encoding = sensor_msgs::image_encodings::BGR8;
+    cv_image.image = rgb_image;
+    cv_image.toImageMsg(ros_image);
+    rgb_pub_.publish(ros_image);
 }
 
 void SensorSimulator::timerMapCallback(const ros::TimerEvent&) {
@@ -219,6 +273,8 @@ void SensorSimulator::odomCallback(const nav_msgs::Odometry::ConstPtr& msg) {
     // 避免仿真odom消息中断，导致时间差太大
     if (fabs((tnow - next_depth_pub_time).toSec()) > 10 * depth_pub_duration.toSec())
         next_depth_pub_time = tnow;
+    if (fabs((tnow - next_rgb_pub_time).toSec()) > 10 * rgb_pub_duration.toSec())
+        next_rgb_pub_time = tnow;
     if (fabs((tnow - next_lidar_pub_time).toSec()) > 10 * lidar_pub_duration.toSec())
         next_lidar_pub_time = tnow;
 
@@ -226,15 +282,21 @@ void SensorSimulator::odomCallback(const nav_msgs::Odometry::ConstPtr& msg) {
         next_depth_pub_time += depth_pub_duration;
         renderDepthCallback(msg->header.stamp);
     }
+    if (tnow >= next_rgb_pub_time){
+        next_rgb_pub_time += rgb_pub_duration;
+        renderRgbCallback(msg->header.stamp);
+    }
     if (tnow >= next_lidar_pub_time){
         next_lidar_pub_time += lidar_pub_duration;
         renderLidarCallback(msg->header.stamp);
     }
     ros::Duration render_duration = ros::Time::now() - tnow;
-    if (render_duration > depth_pub_duration || render_duration > lidar_pub_duration){
+    if (render_duration > depth_pub_duration || render_duration > rgb_pub_duration || render_duration > lidar_pub_duration){
         // Performance reference: should take < 1 ms on 3060 GPU & Ubuntu 20.04
         ROS_WARN("Current Rendering time: %.2f ms, delay too much!", 1000 * render_duration.toSec());
         std::cout << "Average Depth Rendering time: " << (depth_time / (depth_count + 1e-8)) * 1000 << " ms" << std::endl;
+        if (render_rgb)
+            std::cout << "Average RGB Rendering time: " << (rgb_time / (rgb_count + 1e-8)) * 1000 << " ms" << std::endl;
         std::cout << "Average Lidar Rendering time: " << (lidar_time / (lidar_count + 1e-8)) * 1000 << " ms" << std::endl;
     }
 }

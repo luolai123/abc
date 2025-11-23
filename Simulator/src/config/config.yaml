@@ -10,6 +10,7 @@ depth_fps: 33          # odom 100hz, depth 33hz, 每3帧odom渲染一次
 render_lidar: true
 lidar_fps: 10
 render_rgb: true
+rgb_fps: 33
 
 # 2. 仿真环境参数 =============================================================
 random_map: true       # 使用预先建立的点云地图还是随机地图
