@@ -18,6 +18,7 @@
 #include <vector>
 #include <chrono>
 #include <omp.h>
+#include <string>
 #include <yaml-cpp/yaml.h>
 #include "maps.hpp"
 
@@ -45,12 +46,14 @@ public:
 
         render_lidar = config["render_lidar"].as<bool>();
         render_depth = config["render_depth"].as<bool>();
+        render_rgb = config["render_rgb"].as<bool>();
         float depth_fps = config["depth_fps"].as<float>();
         float lidar_fps = config["lidar_fps"].as<float>();
 
         std::string ply_file = config["ply_file"].as<std::string>();
         std::string odom_topic = config["odom_topic"].as<std::string>();
         std::string depth_topic = config["depth_topic"].as<std::string>();
+        std::string rgb_topic = config["rgb_topic"].as<std::string>();
         std::string lidar_topic = config["lidar_topic"].as<std::string>();
 
         // 读取地图参数
@@ -111,6 +114,7 @@ public:
         octree->addPointsFromInputCloud();
 
         image_pub_ = nh_.advertise<sensor_msgs::Image>(depth_topic, 1);
+        rgb_pub_ = nh_.advertise<sensor_msgs::Image>(rgb_topic, 1);
         point_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(lidar_topic, 1);
         odom_sub_ = nh_.subscribe(odom_topic, 1, &SensorSimulator::odomCallback, this, ros::TransportHints().tcpNoDelay());
         timer_depth_ = nh_.createTimer(ros::Duration(1 / depth_fps), &SensorSimulator::timerDepthCallback, this);
@@ -122,6 +126,7 @@ public:
     void odomCallback(const nav_msgs::Odometry::ConstPtr &msg);
 
     cv::Mat renderDepthImage();
+    cv::Mat colorizeDepthImage(const cv::Mat &depth_image) const;
 
     pcl::PointCloud<pcl::PointXYZ> renderLidarPointcloud();
 
@@ -133,6 +138,7 @@ public:
 
 private:
     bool render_depth{false};
+    bool render_rgb{false};
     bool render_lidar{false};
     bool odom_init{false};
     Eigen::Quaternionf quat;
@@ -160,7 +166,7 @@ private:
 
 
     ros::NodeHandle nh_;
-    ros::Publisher image_pub_, point_cloud_pub_;
+    ros::Publisher image_pub_, rgb_pub_, point_cloud_pub_;
     ros::Subscriber odom_sub_;
     ros::Timer timer_depth_, timer_lidar_;
 };

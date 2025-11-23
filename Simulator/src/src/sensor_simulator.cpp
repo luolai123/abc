@@ -1,4 +1,5 @@
 #include "sensor_simulator.h"
+#include <sensor_msgs/image_encodings.h>
 
 cv::Mat SensorSimulator::renderDepthImage(){
 
@@ -48,6 +49,25 @@ cv::Mat SensorSimulator::renderDepthImage(){
     }
 
     return depth_image;
+}
+
+cv::Mat SensorSimulator::colorizeDepthImage(const cv::Mat &depth_image) const {
+    cv::Mat depth_normalized;
+    if (normalize_depth) {
+        depth_normalized = depth_image.clone();
+    } else {
+        depth_image.convertTo(depth_normalized, CV_32FC1, 1.0f / max_depth_dist);
+    }
+
+    cv::threshold(depth_normalized, depth_normalized, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(depth_normalized, depth_normalized, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    cv::Mat depth_uint8;
+    depth_normalized.convertTo(depth_uint8, CV_8UC1, 255.0);
+
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_uint8, depth_color, cv::COLORMAP_TURBO);
+    return depth_color;
 }
 
 pcl::PointCloud<pcl::PointXYZ> SensorSimulator::renderLidarPointcloud() {
@@ -136,14 +156,25 @@ void SensorSimulator::expand_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr expanded_
 void SensorSimulator::timerDepthCallback(const ros::TimerEvent&) {
     if (!odom_init || !render_depth)
         return;
-    cv::Mat depth_iamge = renderDepthImage();
+    cv::Mat depth_image = renderDepthImage();
     sensor_msgs::Image ros_image;
     cv_bridge::CvImage cv_image;
     cv_image.header.stamp = ros::Time::now();
     cv_image.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-    cv_image.image = depth_iamge;
+    cv_image.image = depth_image;
     cv_image.toImageMsg(ros_image);
     image_pub_.publish(ros_image);
+
+    if (render_rgb) {
+        cv::Mat rgb_image = colorizeDepthImage(depth_image);
+        cv_bridge::CvImage rgb_cv_image;
+        rgb_cv_image.header.stamp = cv_image.header.stamp;
+        rgb_cv_image.encoding = sensor_msgs::image_encodings::BGR8;
+        rgb_cv_image.image = rgb_image;
+        sensor_msgs::Image ros_rgb_image;
+        rgb_cv_image.toImageMsg(ros_rgb_image);
+        rgb_pub_.publish(ros_rgb_image);
+    }
 }
 
 void SensorSimulator::timerLidarCallback(const ros::TimerEvent&) {
