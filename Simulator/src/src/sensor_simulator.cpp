@@ -164,17 +164,23 @@ void SensorSimulator::timerDepthCallback(const ros::TimerEvent&) {
     cv_image.image = depth_image;
     cv_image.toImageMsg(ros_image);
     image_pub_.publish(ros_image);
+}
 
-    if (render_rgb) {
-        cv::Mat rgb_image = colorizeDepthImage(depth_image);
-        cv_bridge::CvImage rgb_cv_image;
-        rgb_cv_image.header.stamp = cv_image.header.stamp;
-        rgb_cv_image.encoding = sensor_msgs::image_encodings::BGR8;
-        rgb_cv_image.image = rgb_image;
-        sensor_msgs::Image ros_rgb_image;
-        rgb_cv_image.toImageMsg(ros_rgb_image);
-        rgb_pub_.publish(ros_rgb_image);
-    }
+void SensorSimulator::timerRgbCallback(const ros::TimerEvent&) {
+    if (!odom_init || !render_rgb)
+        return;
+
+    cv::Mat depth_image = renderDepthImage();
+    cv::Mat rgb_image = colorizeDepthImage(depth_image);
+
+    cv_bridge::CvImage rgb_cv_image;
+    rgb_cv_image.header.stamp = ros::Time::now();
+    rgb_cv_image.encoding = sensor_msgs::image_encodings::BGR8;
+    rgb_cv_image.image = rgb_image;
+
+    sensor_msgs::Image ros_rgb_image;
+    rgb_cv_image.toImageMsg(ros_rgb_image);
+    rgb_pub_.publish(ros_rgb_image);
 }
 
 void SensorSimulator::timerLidarCallback(const ros::TimerEvent&) {
