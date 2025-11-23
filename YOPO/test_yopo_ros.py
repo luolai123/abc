@@ -166,26 +166,12 @@ class YopoNet:
         if not self.odom_init:
             return
 
-        # 1. RGB Image Process + segmentation
+        # 1. RGB Image Process + segmentation (monocular camera only)
         time0 = time.time()
-        depth_encodings = {"16UC1", "32FC1"}
-        if data.encoding in depth_encodings:
-            depth = np.frombuffer(data.data, dtype=np.float32 if data.encoding == "32FC1" else np.uint16).reshape(
-                data.height, data.width
-            )
-            if data.encoding == "16UC1":
-                depth = depth.astype(np.float32) * self.scale
-            depth[np.isclose(depth, 0.0)] = self.max_dis
-            depth = np.clip(depth, self.min_dis, self.max_dis)
-
-            depth_norm = (depth - self.min_dis) / (self.max_dis - self.min_dis)
-            depth_uint8 = np.uint8(np.clip(depth_norm, 0.0, 1.0) * 255.0)
-            rgb = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_TURBO)
-        else:
-            assert data.encoding in ["rgb8", "bgr8"], f"Expected encoding 'rgb8' or 'bgr8', got {data.encoding}"
-            rgb = np.frombuffer(data.data, dtype=np.uint8).reshape(data.height, data.width, 3)
-            if data.encoding == "bgr8":
-                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+        assert data.encoding in ["rgb8", "bgr8"], f"Expected encoding 'rgb8' or 'bgr8', got {data.encoding}"
+        rgb = np.frombuffer(data.data, dtype=np.uint8).reshape(data.height, data.width, 3)
+        if data.encoding == "bgr8":
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
         if rgb.shape[0] != self.height or rgb.shape[1] != self.width:
             rgb = cv2.resize(rgb, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
