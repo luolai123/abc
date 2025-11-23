@@ -67,6 +67,18 @@ class YOPODataset(Dataset):
             positions = states[:, 0:3]
             quaternions = states[:, 3:7]
 
+            # Ensure the number of images matches the number of labels to avoid train_test_split errors.
+            # When the dataset contains extra images or missing labels, trim all arrays to the smallest size
+            # while preserving ordering so that samples remain aligned.
+            min_len = min(len(image_file_names), len(positions), len(quaternions))
+            if min_len < len(image_file_names) or min_len < len(positions) or min_len < len(quaternions):
+                print(f"[YOPO] Warning: Mismatched sample counts in map {map_id}. "
+                      f"Images: {len(image_file_names)}, Positions: {len(positions)}, Quaternions: {len(quaternions)}. "
+                      f"Truncating to {min_len}.")
+                image_file_names = image_file_names[:min_len]
+                positions = positions[:min_len]
+                quaternions = quaternions[:min_len]
+
             file_names_train, file_names_val, positions_train, positions_val, quaternions_train, quaternions_val = train_test_split(
                 image_file_names, positions, quaternions, test_size=val_ratio, random_state=0)
 
