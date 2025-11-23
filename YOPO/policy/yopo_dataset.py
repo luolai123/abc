@@ -35,23 +35,35 @@ class YOPODataset(Dataset):
         data_dir = os.path.join(base_dir, "../", cfg["dataset_path"])
         self.img_list, self.map_idx, self.positions, self.quaternions = [], [], np.empty((0, 3), dtype=np.float32), np.empty((0, 4), dtype=np.float32)
 
-        datafolders = [f.path for f in os.scandir(data_dir) if f.is_dir()]
-        datafolders.sort(key=lambda x: int(os.path.basename(x)))
+        datafolders = []
+        map_ids = []
+        for f in os.scandir(data_dir):
+            if not f.is_dir():
+                continue
+
+            basename = os.path.basename(f.path)
+            if basename.isdigit():
+                datafolders.append(f.path)
+                map_ids.append(int(basename))
+            else:
+                print(f"[YOPO] Skip non-numeric dataset folder: {f.path}")
+
+        # Sort by numeric map id to keep alignment with pose-<id>.csv files
+        map_ids, datafolders = zip(*sorted(zip(map_ids, datafolders))) if datafolders else ([], [])
         if mode == 'train':
             print("Datafolders:")
             for folder in datafolders:
                 print("    ", folder)
 
         print("Loading", mode, "dataset")
-        for data_idx in range(len(datafolders)):
-            datafolder = datafolders[data_idx]
+        for map_id, datafolder in zip(map_ids, datafolders):
 
             image_file_names = [datafolder + "/" + filename
                                 for filename in os.listdir(datafolder)
                                 if os.path.splitext(filename)[1] == '.png']
             image_file_names.sort(key=lambda x: int(os.path.basename(x).split('.')[0].split("_")[1]))  # sort by filename to align with the label
 
-            states = np.loadtxt(data_dir + f"/pose-{data_idx}.csv", delimiter=',', skiprows=1).astype(np.float32)
+            states = np.loadtxt(data_dir + f"/pose-{map_id}.csv", delimiter=',', skiprows=1).astype(np.float32)
             positions = states[:, 0:3]
             quaternions = states[:, 3:7]
 
@@ -62,12 +74,12 @@ class YOPODataset(Dataset):
                 self.img_list.extend(file_names_train)
                 self.positions = np.vstack((self.positions, positions_train.astype(np.float32)))
                 self.quaternions = np.vstack((self.quaternions, quaternions_train.astype(np.float32)))
-                self.map_idx.extend([data_idx] * len(file_names_train))
+                self.map_idx.extend([map_id] * len(file_names_train))
             elif mode == 'valid':
                 self.img_list.extend(file_names_val)
                 self.positions = np.vstack((self.positions, positions_val.astype(np.float32)))
                 self.quaternions = np.vstack((self.quaternions, quaternions_val.astype(np.float32)))
-                self.map_idx.extend([data_idx] * len(file_names_val))
+                self.map_idx.extend([map_id] * len(file_names_val))
             else:
                 raise ValueError(f"Invalid mode {mode}. Choose from 'train', 'valid'.")
 
