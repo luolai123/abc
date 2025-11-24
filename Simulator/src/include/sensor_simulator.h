@@ -129,6 +129,7 @@ public:
 
     cv::Mat renderDepthImage();
     cv::Mat colorizeDepthImage(const cv::Mat &depth_image) const;
+    cv::Mat depthToMonoImage(const cv::Mat &depth_image) const;
 
     void timerRgbCallback(const ros::TimerEvent &);
 
