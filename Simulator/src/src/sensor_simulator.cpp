@@ -70,6 +70,22 @@ cv::Mat SensorSimulator::colorizeDepthImage(const cv::Mat &depth_image) const {
     return depth_color;
 }
 
+cv::Mat SensorSimulator::depthToMonoImage(const cv::Mat &depth_image) const {
+    cv::Mat depth_normalized;
+    if (normalize_depth) {
+        depth_normalized = depth_image.clone();
+    } else {
+        depth_image.convertTo(depth_normalized, CV_32FC1, 1.0f / max_depth_dist);
+    }
+
+    cv::threshold(depth_normalized, depth_normalized, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(depth_normalized, depth_normalized, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    cv::Mat mono_image;
+    depth_normalized.convertTo(mono_image, CV_8UC1, 255.0);
+    return mono_image;
+}
+
 pcl::PointCloud<pcl::PointXYZ> SensorSimulator::renderLidarPointcloud() {
     Eigen::Matrix3f R_wc = quat.toRotationMatrix();
     Eigen::Matrix3f R_cw = R_wc.inverse();
@@ -171,11 +187,11 @@ void SensorSimulator::timerRgbCallback(const ros::TimerEvent&) {
         return;
 
     cv::Mat depth_image = renderDepthImage();
-    cv::Mat rgb_image = colorizeDepthImage(depth_image);
+    cv::Mat rgb_image = depthToMonoImage(depth_image);
 
     cv_bridge::CvImage rgb_cv_image;
     rgb_cv_image.header.stamp = ros::Time::now();
-    rgb_cv_image.encoding = sensor_msgs::image_encodings::BGR8;
+    rgb_cv_image.encoding = sensor_msgs::image_encodings::MONO8;
     rgb_cv_image.image = rgb_image;
 
     sensor_msgs::Image ros_rgb_image;

@@ -38,6 +38,7 @@ rosrun sensor_simulator sensor_simulator
 odom_topic: "/sim/odom"
 depth_topic: "/depth_image"
 lidar_topic: "/lidar_points"
+rgb_topic: "/mono_image"   # 发布单目灰度图（MONO8）
 # 使用预先构建的点云地图还是随机地图
 random_map: true
 # 随机地图配置

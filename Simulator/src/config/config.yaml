@@ -1,7 +1,7 @@
 # 1. ROS节点参数 =============================================================
 odom_topic: "/sim/odom"
 depth_topic: "/depth_image"
-rgb_topic: "/rgb_image"
+rgb_topic: "/mono_image"   # 单目灰度图话题
 lidar_topic: "/lidar_points"
 
 render_depth: true

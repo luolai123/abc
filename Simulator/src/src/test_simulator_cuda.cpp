@@ -40,6 +40,22 @@ cv::Mat colorizeDepthImage(const cv::Mat &depth_image, float max_depth_dist, boo
     return depth_color;
 }
 
+cv::Mat depthToMonoImage(const cv::Mat &depth_image, float max_depth_dist, bool normalize_depth) {
+    cv::Mat depth_normalized;
+    if (normalize_depth) {
+        depth_normalized = depth_image.clone();
+    } else {
+        depth_image.convertTo(depth_normalized, CV_32FC1, 1.0f / max_depth_dist);
+    }
+
+    cv::threshold(depth_normalized, depth_normalized, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::threshold(depth_normalized, depth_normalized, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    cv::Mat mono_image;
+    depth_normalized.convertTo(mono_image, CV_8UC1, 255.0);
+    return mono_image;
+}
+
 class SensorSimulator {
 public:
     SensorSimulator(ros::NodeHandle &nh) : nh_(nh) {
@@ -213,7 +229,7 @@ void SensorSimulator::renderRgbCallback(const ros::Time stamp) {
     cudaMat::SE3<float> T_wc(quat_wc.w(), quat_wc.x(), quat_wc.y(), quat_wc.z(), pos.x(), pos.y(), pos.z());
     cv::Mat depth_image;
     renderDepthImage(grid_map, camera, T_wc, depth_image);
-    cv::Mat rgb_image = colorizeDepthImage(depth_image, camera->max_depth_dist, camera->normalize_depth);
+    cv::Mat rgb_image = depthToMonoImage(depth_image, camera->max_depth_dist, camera->normalize_depth);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
@@ -223,7 +239,7 @@ void SensorSimulator::renderRgbCallback(const ros::Time stamp) {
     sensor_msgs::Image ros_image;
     cv_bridge::CvImage cv_image;
     cv_image.header.stamp = stamp;
-    cv_image.encoding = sensor_msgs::image_encodings::BGR8;
+    cv_image.encoding = sensor_msgs::image_encodings::MONO8;
     cv_image.image = rgb_image;
     cv_image.toImageMsg(ros_image);
     rgb_pub_.publish(ros_image);
